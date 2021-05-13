@@ -1,0 +1,284 @@
+image:
+  name: registry.gitlab.com/famedly/containers/flutter-dockerimages:stable
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+
+.shared_windows_runners:
+  tags:
+    - shared-windows
+    - windows
+    - windows-1809
+
+stages:
+  - coverage
+  - release
+  - deploy
+
+code_analyze:
+  stage: coverage
+  script: [./scripts/code_analyze.sh]
+
+test:
+  stage: coverage
+  script: [flutter test]
+
+build_web:
+  stage: coverage
+  before_script:
+    [sudo apt update && sudo apt install curl -y, ./scripts/prepare-web.sh]
+  script: [./scripts/build-web.sh]
+  artifacts:
+    paths:
+      - build/web/
+
+build_windows:
+  extends:
+    - .shared_windows_runners
+  stage: coverage
+  script:
+    # Install chocolately
+    - Set-ExecutionPolicy Bypass -Scope Process
+    - Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+    - choco install git -y
+    - choco install visualstudio2019community -y --package-parameters "--add Microsoft.VisualStudio.Product.BuildTools --includeRecommended --includeOptional --passive --locale en-US"
+    - cd ..; git clone https://github.com/flutter/flutter.git -b dev; $env:path += ";C:\GitLab-Runner\builds\famedly\flutter\bin"; cd fluffychat
+    - flutter doctor
+    - flutter config --enable-windows-desktop
+    - '$package_override = "`r`ndependency_overrides:`r`n  intl: 0.17.0-nullsafety.2"'
+    - '[System.IO.File]::AppendAllText("$CI_PROJECT_DIR/pubspec.yaml", $package_override, [System.Text.Encoding]::UTF8)'
+    - flutter clean
+    - flutter pub get
+    - flutter build windows
+  needs: []
+  artifacts:
+    paths:
+      - build/windows/runner/Release/
+    name: "Binaries"
+  allow_failure: true
+
+build_android_debug:
+  stage: coverage
+  script: [./scripts/build-android-debug.sh]
+  artifacts:
+    when: on_success
+    paths:
+      - build/app/outputs/apk/debug/app-debug.apk
+  except:
+    - main
+    - tags
+
+build_android_apk:
+  stage: coverage
+  before_script: [./scripts/prepare-android-release.sh]
+  script: [./scripts/build-android-apk.sh]
+  artifacts:
+    when: on_success
+    paths:
+      - build/android/app-release.apk
+  only:
+    - main
+    - tags
+
+build_android_appbundle:
+  stage: coverage
+  before_script: [./scripts/prepare-android-release.sh]
+  script: [./scripts/release-playstore-beta.sh]
+  artifacts:
+    when: on_success
+    paths:
+      - build/android/app-release.aab
+  resource_group: playstore_release
+  only:
+    - main
+
+upload-fdroid:
+  stage: release
+  before_script:
+    - "which ssh-agent || (sudo apt-get update -y && sudo apt-get install openssh-client -y )"
+    - "which rsync || (sudo apt-get update -y && sudo apt-get install rsync -y )"
+    - "which pcregrep || (sudo apt-get update -y && sudo apt-get install pcregrep -y )"
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -t rsa fdroid.nordgedanken.dev >> ~/.ssh/known_hosts
+  script:
+    - cd build/android/
+    - export UPDATE_VERSION=$(pcregrep -o1 'version:\s([0-9]*\.[0-9]*\.[0-9]*)\+[0-9]*' ../../pubspec.yaml) && mv app-release.apk "${UPDATE_VERSION}.apk"
+    - rsync -rav -e ssh ./ fluffy@fdroid.nordgedanken.dev:/opt/fdroid/fluffychat/repo
+    - ssh fluffy@fdroid.nordgedanken.dev -t '/bin/bash -i -l -c "cd /opt/fdroid/fluffychat && fdroid update --verbose"'
+  needs: ["build_android_apk"]
+  resource_group: playstore_release
+  allow_failure: true
+  only:
+    - tags
+
+upload-fdroid-nightly:
+  stage: release
+  before_script:
+    - "which ssh-agent || (sudo apt-get update -y && sudo apt-get install openssh-client -y )"
+    - "which rsync || (sudo apt-get update -y && sudo apt-get install rsync -y )"
+    - "which pcregrep || (sudo apt-get update -y && sudo apt-get install pcregrep -y )"
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -t rsa fdroid.nordgedanken.dev >> ~/.ssh/known_hosts
+  script:
+    - cd build/android/
+    - export UPDATE_VERSION=$(pcregrep -o1 'version:\s([0-9]*\.[0-9]*\.[0-9]*)\+[0-9]*' ../../pubspec.yaml) && mv app-release.apk "${UPDATE_VERSION}_$(date +%s).apk"
+    - rsync -rav -e ssh ./ fluffy@fdroid.nordgedanken.dev:/opt/fdroid/fluffychat-nightly/repo
+    - ssh fluffy@fdroid.nordgedanken.dev -t '/bin/bash -i -l -c "cd /opt/fdroid/fluffychat-nightly && fdroid update --verbose"'
+  needs: ["build_android_apk"]
+  resource_group: playstore_release
+  allow_failure: true
+  only:
+    - main
+
+pages:
+  stage: deploy
+  image: ruby:latest
+  script:
+    - cp PRIVACY.md docs/_includes/privacy.md
+    - cp CHANGELOG.md docs/_includes/changelog.md
+    - cd docs
+    - gem install bundler
+    - bundle install
+    - bundle exec jekyll build -d public
+    - cd ..
+    - mv docs/public/ ./
+    - mv build/web/ public/web/
+  artifacts:
+    paths:
+      - public
+  only:
+    - main
+
+build_linux:
+  stage: coverage
+  before_script:
+    [
+      sudo apt update && sudo apt install curl clang cmake ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev -y,
+    ]
+  script: [./scripts/build-linux.sh]
+  artifacts:
+    when: on_success
+    paths:
+      - build/linux/release/bundle/
+  allow_failure: true
+
+#snap:edge:
+#  stage: release
+#  image: "snapcore/snapcraft"
+#  before_script:
+#    - apt update && apt install git curl unzip clang cmake build-essential ninja-build pkg-config libgtk-3-dev libblkid-dev liblzma-dev -y
+#    - git clone https://github.com/flutter/flutter.git
+#    - export PATH="$PATH:`pwd`/flutter/bin"
+#  variables:
+#    SNAPCRAFT_LOGIN_FILE: ${SNAPCRAFT_LOGIN_FILE}
+#  only:
+#    - main
+#  script: [./scripts/publish-snap-edge.sh]
+#  needs: ["build_linux"]
+#  artifacts:
+#    paths:
+#      - "./*.snap"
+#    when: on_success
+#  allow_failure: true
+
+#snap:publish:
+#  stage: release
+#  image: "snapcore/snapcraft"
+#  variables:
+#    SNAPCRAFT_LOGIN_FILE: ${SNAPCRAFT_LOGIN_FILE}
+#  only:
+#    - tags
+#  script: [./scripts/publish-snap-stable.sh]
+#  needs: ["build_linux"]
+#  artifacts:
+#    paths:
+#      - "./*.snap"
+#    when: on_success
+#    expire_in: 1 week
+#  allow_failure: true
+
+update-dependencies:
+  stage: coverage
+  needs: []
+  tags:
+    - docker
+  only:
+    - schedules
+  variables:
+    HOST: ${CI_PROJECT_URL}
+    UPDATE_BRANCH: ci-bot/dependency-updates
+    PRIVATE_TOKEN: ${GITLAB_API_TOKEN}
+  before_script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_BOT_KEY" | tr -d '\r' | ssh-add - > /dev/null
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - ssh-keyscan -t rsa gitlab.com >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+    - git config --global user.email "bot@fluffy.chat"
+    - git config --global user.name "Dependency Update Bot"
+    - sudo apt-get update && sudo apt-get install -y curl
+  script:
+    - ./scripts/update-dependencies.sh
+    - git remote set-url --push origin git@gitlab.com:$CI_PROJECT_PATH
+    - 'git diff --exit-code || (git checkout -B ${UPDATE_BRANCH} && git add . && git commit -m "chore: Update dependencies" && git push -f origin ${UPDATE_BRANCH} && ./scripts/open-mr.sh)'
+
+.release:
+  stage: release
+  image: curlimages/curl:latest
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+  before_script:
+    - export RELEASE_VERSION=$(echo $CI_COMMIT_TAG | grep -oE "\d+\.\d+\.\d+")
+    - export PACKAGE_REGISTRY_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/fluffychat/${RELEASE_VERSION}"
+
+upload-android:
+  extends: .release
+  script:
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file build/android/app-release.apk ${PACKAGE_REGISTRY_URL}/fluffychat.apk
+
+upload-web:
+  extends: .release
+  script:
+    - tar czf package.tar.gz -C build/web/ .
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file package.tar.gz ${PACKAGE_REGISTRY_URL}/fluffychat-web.tar.gz
+
+upload-linux:
+  extends: .release
+  script:
+    - tar czf package.tar.gz -C build/linux/release/bundle/ .
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file package.tar.gz ${PACKAGE_REGISTRY_URL}/fluffychat-linux.tar.gz
+
+upload-windows:
+  extends: .release
+  script:
+    - tar czf package.tar.gz -C build/windows/runner/Release/ .
+    - |
+      curl --header "JOB-TOKEN: ${CI_JOB_TOKEN}" --upload-file package.tar.gz ${PACKAGE_REGISTRY_URL}/fluffychat-windows.tar.gz
+
+upload-playstore:
+  extends: .release
+  before_script: [./scripts/prepare-android-release.sh]
+  script: [./scripts/release-playstore.sh]
+  resource_group: playstore_release
+
+release:
+  extends: .release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+
+  script:
+    - |
+      release-cli create --name "Release ${CI_COMMIT_TAG}" --tag-name $CI_COMMIT_TAG \
+        --assets-link "{\"name\":\"fluffychat.apk\",\"url\":\"${PACKAGE_REGISTRY_URL}/fluffychat.apk\"}" \
+        --assets-link "{\"name\":\"fluffychat-linux.tar.gz\",\"url\":\"${PACKAGE_REGISTRY_URL}/fluffychat-linux.tar.gz\"}" \
+        --assets-link "{\"name\":\"fluffychat-windows.tar.gz\",\"url\":\"${PACKAGE_REGISTRY_URL}/fluffychat-windows.tar.gz\"}" \
+        --assets-link "{\"name\":\"fluffychat-web.tar.gz\",\"url\":\"${PACKAGE_REGISTRY_URL}/fluffychat-web.tar.gz\"}"

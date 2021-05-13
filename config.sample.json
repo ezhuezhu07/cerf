@@ -1,0 +1,13 @@
+{
+  "application_name": "CerfKahn Chat",
+  "application_welcome_message": null,
+  "default_homeserver": "192.168.1.151:8008",
+  "jitsi_instance": "https://vannevar-meet.phyos.live/",
+  
+  "privacy_url": "https://fluffychat.im/en/privacy.html",
+  "render_html": false,
+  "hide_redacted_events": false,
+  "hide_unknown_events": false
+}
+
+ 
